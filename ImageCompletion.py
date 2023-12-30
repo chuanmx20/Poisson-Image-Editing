@@ -60,8 +60,9 @@ def find_best_patch(input_img, mask_img, patch_img, k=10, use_fft=True):
                 best_position = (x, y)
     return best_position
 
-def apply_best_patch(input_img, mask_img, patch_img):
-    """Apply the best patch to the input image."""
+# Use GraphCut to do with boundary
+def apply_best_patch_graphcut(input_img, mask_img, patch_img):
+    """Apply the best patch to the input image using GraphCut."""
     best_position = find_best_patch(input_img, mask_img, patch_img)
     patch_x, patch_y = best_position
     h, w = mask_img.shape
@@ -71,40 +72,52 @@ def apply_best_patch(input_img, mask_img, patch_img):
 
     # Apply the mask to the input image, blacking out the area to be patched
     input_img_masked = cv2.bitwise_and(input_img, input_img, mask=mask_img)
-
+    
     # Invert the mask to apply the best patch
     inv_mask = cv2.bitwise_not(mask_img)
-
+    
     # Combine the input image with the masked area blacked out and the best patch
-    return cv2.bitwise_or(input_img_masked, cv2.bitwise_and(best_patch, best_patch, mask=inv_mask))
+    result_img = cv2.bitwise_or(input_img_masked, cv2.bitwise_and(best_patch, best_patch, mask=inv_mask))
+    
+    # Use GraphCut to do with boundary
+    g = maxflow.Graph[float]()
+    nodeids = g.add_grid_nodes(result_img.shape[:2])
+    g.add_grid_edges(nodeids, 50)
+    g.add_grid_tedges(nodeids, result_img[:, :, 0], 255-result_img[:, :, 0])
+    g.maxflow()
+    sgm = g.get_grid_segments(nodeids)
+    mask = np.logical_not(sgm)
+    result_img = np.where(mask[:, :, np.newaxis], result_img, 255)
+    return result_img
 
+def complete_and_display(inputs, masks, patches):
+    plt.figure(figsize=(16, 8))
+    for i, (input_img, mask_img, patch_img) in enumerate(zip(inputs, masks, patches)):
+        # Apply the patch considering the mask
+        result_img = apply_best_patch_graphcut(input_img, mask_img, patch_img)
 
-# Apply the patch with mask to each image and display the results
-plt.figure(figsize=(16, 8))
-for i, (input_img, mask_img, patch_img) in enumerate(zip(inputs, masks, patches)):
-    # Apply the patch considering the mask
-    result_img = apply_best_patch(input_img, mask_img, patch_img)
+        # Plotting
+        plt.subplot(len(inputs), 4, i * 4 + 1)
+        plt.imshow(cv2.cvtColor(input_img, cv2.COLOR_BGR2RGB))
+        plt.title(f"Input {i+1}")
+        plt.axis('off')
 
-    # Plotting
-    plt.subplot(len(inputs), 4, i * 4 + 1)
-    plt.imshow(cv2.cvtColor(input_img, cv2.COLOR_BGR2RGB))
-    plt.title(f"Input {i+1}")
-    plt.axis('off')
+        plt.subplot(len(inputs), 4, i * 4 + 2)
+        plt.imshow(mask_img, cmap='gray')
+        plt.title(f"Mask {i+1}")
+        plt.axis('off')
 
-    plt.subplot(len(inputs), 4, i * 4 + 2)
-    plt.imshow(mask_img, cmap='gray')
-    plt.title(f"Mask {i+1}")
-    plt.axis('off')
+        plt.subplot(len(inputs), 4, i * 4 + 3)
+        plt.imshow(cv2.cvtColor(patch_img, cv2.COLOR_BGR2RGB))
+        plt.title(f"Patch {i+1}")
+        plt.axis('off')
 
-    plt.subplot(len(inputs), 4, i * 4 + 3)
-    plt.imshow(cv2.cvtColor(patch_img, cv2.COLOR_BGR2RGB))
-    plt.title(f"Patch {i+1}")
-    plt.axis('off')
+        plt.subplot(len(inputs), 4, i * 4 + 4)
+        plt.imshow(cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB))
+        plt.title(f"Result {i+1}")
+        plt.axis('off')
 
-    plt.subplot(len(inputs), 4, i * 4 + 4)
-    plt.imshow(cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB))
-    plt.title(f"Result {i+1}")
-    plt.axis('off')
-
-plt.tight_layout()
-plt.show()
+    plt.tight_layout()
+    plt.show()
+    
+complete_and_display(inputs, masks, patches)
