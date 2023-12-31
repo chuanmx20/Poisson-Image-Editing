@@ -15,20 +15,22 @@ from scipy.signal import convolve2d
 def prepare_images(input_path, mask_path, patch_path):
     input_img = cv2.imread(input_path)
     mask_img = cv2.imread(mask_path, 0)
+    mask_img = mask_img.astype(bool)
     mask_img = np.invert(mask_img)
     patch_img = cv2.imread(patch_path)
     return input_img, mask_img, patch_img
 
 def dilate_mask(mask_img, k=3):
     kernel = np.ones((k, k), np.uint8)
-    dilated_mask = cv2.dilate(mask_img, kernel, iterations=3)
-    return dilated_mask
+    mask_img = mask_img.astype(np.uint8) * 255
+    dilated_mask = cv2.dilate(mask_img, kernel, iterations=5)
+    return np.clip(dilated_mask, 0, 1)
 
 def mask_image(input_img, mask_img):
     # 将mask_img转换为bool类型的mask
     mask_img = mask_img.astype(bool)
     masked_img = input_img.copy()
-    masked_img[mask_img==0] = 0    
+    masked_img[mask_img] = 0    
     return masked_img
 
 def get_patch(patch_shape, patch_img, best_match):
@@ -77,6 +79,7 @@ def find_best_match(masked_region, patch_img):
 
 # 在待补全的图像和补丁图像（用于填补空缺的图像）之间找到最佳的融合边界
 def find_boundary_graphcut(incomplete_img, patch_img, mask):
+    mask = mask.astype(np.uint8) * 255
     # 创建一个图
     g = maxflow.Graph[float]()
 
@@ -114,8 +117,16 @@ def poisson_blend(patch, mask, sgm, dest):
         sgm (_type_): 使用GraphCut得到的分割结果
         dest (_type_): 待补全的图像，已经经过mask处理
     """
+    # 将mask转换为bool类型
+    mask = mask.astype(bool)
+    sgm = sgm.astype(bool)
     # 计算融合边界
     boundary = np.logical_xor(sgm, mask)
+    plt.imshow(boundary)
+    plt.show()
+    # boundary = sgm - mask
+    patch = patch.astype(np.float64)
+    dest = dest.astype(np.float64)
     # 对于Poisson Blending，首先需要构建系数矩阵A和b
     # 首先给mask部分的像素编号，编号的顺序是从左到右，从上到下
     n_pixels = np.sum(sgm)
@@ -125,57 +136,122 @@ def poisson_blend(patch, mask, sgm, dest):
         if sgm[i, j]:
             pixel_dict[(i, j)] = pixel_index
             pixel_index += 1
-
+    def neighbors_with_mask(img, mask, i, j, c):
+        up = img[i-1, j, c] if i > 0 and mask[i-1, j] else 0
+        down = img[i+1, j, c] if i < img.shape[0]-1 and mask[i+1, j] else 0
+        left = img[i, j-1, c] if j > 0 and mask[i, j-1] else 0
+        right = img[i, j+1, c] if j < img.shape[1]-1 and mask[i, j+1] else 0
+        return up, down, left, right
+    
+    def neighbors(img, i, j, c):
+        up = img[i-1, j, c] if i > 0 else 0
+        down = img[i+1, j, c] if i < img.shape[0]-1 else 0
+        left = img[i, j-1, c] if j > 0 else 0
+        right = img[i, j+1, c] if j < img.shape[1]-1 else 0
+        return up, down, left, right
+    def neighbor_flag(img, mask, i, j, c):
+        up = img[i-1, j, c] if i > 0 and mask[i-1, j] else 0
+        down = img[i+1, j, c] if i < img.shape[0]-1 and mask[i+1, j] else 0
+        left = img[i, j-1, c] if j > 0 and mask[i, j-1] else 0
+        right = img[i, j+1, c] if j < img.shape[1]-1 and mask[i, j+1] else 0
+        return up, down, left, right
     # 针对每个channel，构建系数矩阵A和b
     for color in range(3):
         # 构建系数矩阵A和指导向量b
         # A 就是一个对角矩阵，对角线上的元素为4，对应像素的相邻元素为-1
-        A = lil_matrix((n_pixels, n_pixels))
-        for i in range(n_pixels):
-            A[i, i] = 4
-            if i-1 >= 0:
-                A[i, i-1] = -1
-            if i+1 < n_pixels:
-                A[i, i+1] = -1
-            if i-sgm.shape[1] >= 0:
-                A[i, i-sgm.shape[1]] = -1
-            if i+sgm.shape[1] < n_pixels:
-                A[i, i+sgm.shape[1]] = -1
-        
-        # b 是一个向量，每个元素为对应像素的梯度
-        patch_flat = []
+        A = lil_matrix((n_pixels, n_pixels), dtype=np.float64)
+        b = np.zeros((n_pixels,), dtype=np.float64)
         for (i, j), pid in pixel_dict.items():
+            A[pid, pid] = 4
+            if (i-1, j) in pixel_dict:
+                A[pid, pixel_dict[(i-1, j)]] = -1
+            if (i+1, j) in pixel_dict:
+                A[pid, pixel_dict[(i+1, j)]] = -1
+            if (i, j-1) in pixel_dict:
+                A[pid, pixel_dict[(i, j-1)]] = -1
+            if (i, j+1) in pixel_dict:
+                A[pid, pixel_dict[(i, j+1)]] = -1
+            # TODO: 这里的边界条件需要修改
             if boundary[i, j]:
-                patch_flat.append(dest[i, j, color])
+                up, down, left, right = neighbors_with_mask(dest, mask==0, i, j, color)
+                b[pid] = 4 * dest[i, j, color] - up - down - left - right
             else:
-                patch_flat.append(patch[i, j, color])
-            # patch_flat.append(patch[i, j, color])
+                up, down, left, right = neighbors_with_mask(patch, sgm, i, j, color)
+                b[pid] = 4 * patch[i, j, color] - up - down - left - right
+                # flags = neighbor_flag(patch, sgm, i, j, color)
+                # up, down, left, right = neighbors(dest, i, j, color)
+                # if flags[0]:
+                #     b[pid] += up
+                # if flags[1]:
+                #     b[pid] += down
+                # if flags[2]:
+                #     b[pid] += left
+                # if flags[3]:
+                #     b[pid] += right
             
-        b = A.dot(patch_flat)
+        # 解线性方程组
         x = spsolve(A.tocsr(), b)
         print(x)
-        # 将解写入dest
+        x = np.clip(x, 0, 255)
+        # 将解的结果写回dest
         for (i, j), pid in pixel_dict.items():
-            dest[i, j, color] = x[pid]
-
+            dest[i, j, color] += x[pid]
+        
     return dest
 
 def complete_image(input_path, mask_path, patch_path, i):
     # 准备图像
     input_img, mask_img, patch_img = prepare_images(input_path, mask_path, patch_path)
+    stage1 = input_img.copy()
     # 膨胀mask
     dilated_mask = dilate_mask(mask_img)
     # 被mask的区域
-    masked_region = mask_image(input_img, dilated_mask)
-    incomplete_region = input_img - masked_region
+    incomplete_img = mask_image(input_img, dilated_mask)
+    masked_region = input_img - incomplete_img
     # 找到最佳匹配位置
     best_match = find_best_match(masked_region, patch_img)
     # 裁切出patch
     patch = get_patch(masked_region.shape, patch_img, best_match)
     # 使用GraphCut找到融合边界
-    sgm = find_boundary_graphcut(incomplete_region, patch, dilated_mask)
+    sgm = find_boundary_graphcut(input_img, patch, dilated_mask)
+    stage2 = stage1.copy()
+    stage2[sgm] = 0
+    stage3 = patch.copy()
+    stage3[sgm==0] = 0
     # 使用Poisson Blending融合两部分图片
-    blended = poisson_blend(patch, dilated_mask, sgm, input_img)
-    cv2.imwrite(f'complete{i}.jpg', blended)
+    blended = poisson_blend(patch, dilated_mask, sgm, input_img).astype(np.uint8)
+    return stage1, stage2, stage2+stage3, blended
 
-completed_img = complete_image('data/completion/input1.jpg', 'data/completion/input1_mask.jpg', 'data/completion/input1_patch.jpg', 1)
+plt.figure()
+n = 1
+for i in range(1, n+1):
+    input_img, incomplete, naive, blended = complete_image(f'data/completion/input{i}.jpg', f'data/completion/input{i}_mask.jpg', f'data/completion/input{i}_patch.jpg', i)
+    plt.subplot(n, 4, i*4-3)
+    plt.imshow(cv2.cvtColor(input_img, cv2.COLOR_BGR2RGB))
+    plt.title(f'Input {i}')
+    plt.axis('off')
+    plt.subplot(n, 4, i*4-2)
+    plt.imshow(cv2.cvtColor(incomplete, cv2.COLOR_BGR2RGB))
+    plt.title(f'Incomplete {i}')
+    plt.axis('off')
+    plt.subplot(n, 4, i*4-1)
+    plt.imshow(cv2.cvtColor(naive, cv2.COLOR_BGR2RGB))
+    plt.title(f'Naive {i}')
+    plt.axis('off')
+    plt.subplot(n, 4, i*4)
+    plt.imshow(cv2.cvtColor(blended, cv2.COLOR_BGR2RGB))
+    plt.title(f'Poisson Blended {i}')
+    plt.axis('off')
+plt.show()
+
+# plt.figure()
+# input_path = "data/test/input1.png"
+# mask_path = "data/test/input1_mask.png"
+# patch_path = "data/test/input1_patch.png"
+# input_img, mask_img, patch_img = prepare_images(input_path, mask_path, patch_path)
+# sgm = dilate_mask(mask_img)
+# # sgm = mask_img
+# plt.imshow(sgm)
+# plt.show()
+# blended =  poisson_blend(patch_img, mask_img, sgm, input_img)
+# cv2.imwrite("data/test/input1_blended.png", blended)
