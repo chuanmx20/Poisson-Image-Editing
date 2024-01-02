@@ -1,13 +1,14 @@
 import cv2
 import itertools
 import numpy as np
+import scipy
 from scipy.signal import fftconvolve
 import matplotlib.pyplot as plt
 import maxflow
 from pyamg.gallery import poisson
+import scipy
 from scipy.sparse import csr_matrix
 from skimage.color import rgb2gray
-from scipy.ndimage import laplace
 from scipy.sparse import lil_matrix, csr_matrix
 from scipy.sparse.linalg import spsolve
 from scipy.signal import convolve2d
@@ -23,7 +24,7 @@ def prepare_images(input_path, mask_path, patch_path):
 def dilate_mask(mask_img, k=3):
     kernel = np.ones((k, k), np.uint8)
     mask_img = mask_img.astype(np.uint8) * 255
-    dilated_mask = cv2.dilate(mask_img, kernel, iterations=5)
+    dilated_mask = cv2.dilate(mask_img, kernel, iterations=7)
     return np.clip(dilated_mask, 0, 1)
 
 def mask_image(input_img, mask_img):
@@ -97,106 +98,87 @@ def find_boundary_graphcut(incomplete_img, patch_img, mask):
                 g.add_edge(nodeids[i,j], nodeids[i+1,j], weight, weight)
 
     # 设置源点和汇点的边权重
-    g.add_grid_tedges(nodeids, mask, 255-mask)
+    g.add_grid_tedges(nodeids,255 - mask, mask)
 
     # 计算最大流
     g.maxflow()
 
     # 获取分割
     sgm = g.get_grid_segments(nodeids)
-    return np.invert(sgm)
+    return sgm
 
+def is_boundatry(mask, x, y):
+    """
+    用于判断像素(x, y)是否是mask的边界像素，即(x, y)处于mask内部，但是(x, y)的邻居中有像素不在mask内部
+    """
+    if not mask[x, y]:
+        return False
+    for di, dj in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+        i, j = x + di, y + dj
+        if i >= 0 and i < mask.shape[0] and j >= 0 and j < mask.shape[1]:
+            if not mask[i, j]:
+                return True
+    return False
 
-
-def poisson_blend(patch, mask, sgm, dest):
+def poisson_blend(patch, sgm, dest):
     """
     使用泊松融合算法将补丁与不完整的图像融合。
     Args:
         patch (np.array): 用于补全的patch，已经经过mask处理
-        mask (_type_): mask区域，0表示待补全区域，1表示已知区域
         sgm (_type_): 使用GraphCut得到的分割结果
         dest (_type_): 待补全的图像，已经经过mask处理
     """
     # 将mask转换为bool类型
-    mask = mask.astype(bool)
     sgm = sgm.astype(bool)
-    # 计算融合边界
-    boundary = np.logical_xor(sgm, mask)
-    plt.imshow(boundary)
-    plt.show()
-    # boundary = sgm - mask
     patch = patch.astype(np.float64)
     dest = dest.astype(np.float64)
+
     # 对于Poisson Blending，首先需要构建系数矩阵A和b
     # 首先给mask部分的像素编号，编号的顺序是从左到右，从上到下
     n_pixels = np.sum(sgm)
     pixel_dict = {} # 像素坐标到编号的映射
     pixel_index = 0
+    # 记录每个像素的邻居
+    patch_nb_f = []
     for i, j in itertools.product(range(sgm.shape[0]), range(sgm.shape[1])):
         if sgm[i, j]:
             pixel_dict[(i, j)] = pixel_index
+
+            patch_nb_f.append(get_neighbor_flags(patch, sgm, i, j))
             pixel_index += 1
-    def neighbors_with_mask(img, mask, i, j, c):
-        up = img[i-1, j, c] if i > 0 and mask[i-1, j] else 0
-        down = img[i+1, j, c] if i < img.shape[0]-1 and mask[i+1, j] else 0
-        left = img[i, j-1, c] if j > 0 and mask[i, j-1] else 0
-        right = img[i, j+1, c] if j < img.shape[1]-1 and mask[i, j+1] else 0
-        return up, down, left, right
     
-    def neighbors(img, i, j, c):
-        up = img[i-1, j, c] if i > 0 else 0
-        down = img[i+1, j, c] if i < img.shape[0]-1 else 0
-        left = img[i, j-1, c] if j > 0 else 0
-        right = img[i, j+1, c] if j < img.shape[1]-1 else 0
-        return up, down, left, right
-    def neighbor_flag(img, mask, i, j, c):
-        up = img[i-1, j, c] if i > 0 and mask[i-1, j] else 0
-        down = img[i+1, j, c] if i < img.shape[0]-1 and mask[i+1, j] else 0
-        left = img[i, j-1, c] if j > 0 and mask[i, j-1] else 0
-        right = img[i, j+1, c] if j < img.shape[1]-1 and mask[i, j+1] else 0
-        return up, down, left, right
     # 针对每个channel，构建系数矩阵A和b
     for color in range(3):
+        # 计算补丁图像散度
+        patch_laplace = scipy.ndimage.convolve(patch[:, :, color], np.array([[0, -1, 0], [-1, 4, -1], [0, -1, 0]]), mode='constant')
         # 构建系数矩阵A和指导向量b
         # A 就是一个对角矩阵，对角线上的元素为4，对应像素的相邻元素为-1
         A = lil_matrix((n_pixels, n_pixels), dtype=np.float64)
         b = np.zeros((n_pixels,), dtype=np.float64)
         for (i, j), pid in pixel_dict.items():
-            A[pid, pid] = 4
-            if (i-1, j) in pixel_dict:
-                A[pid, pixel_dict[(i-1, j)]] = -1
-            if (i+1, j) in pixel_dict:
-                A[pid, pixel_dict[(i+1, j)]] = -1
-            if (i, j-1) in pixel_dict:
-                A[pid, pixel_dict[(i, j-1)]] = -1
-            if (i, j+1) in pixel_dict:
-                A[pid, pixel_dict[(i, j+1)]] = -1
-            # TODO: 这里的边界条件需要修改
-            if boundary[i, j]:
-                up, down, left, right = neighbors_with_mask(dest, mask==0, i, j, color)
-                b[pid] = 4 * dest[i, j, color] - up - down - left - right
+            if is_boundatry(sgm, i, j):
+                # 融合边界的像素，直接将dest中的像素值作为b的值
+                A[pid, pid] = -1
+                b[pid] = np.negative(dest[i, j, color])
+                
             else:
-                up, down, left, right = neighbors_with_mask(patch, sgm, i, j, color)
-                b[pid] = 4 * patch[i, j, color] - up - down - left - right
-                # flags = neighbor_flag(patch, sgm, i, j, color)
-                # up, down, left, right = neighbors(dest, i, j, color)
-                # if flags[0]:
-                #     b[pid] += up
-                # if flags[1]:
-                #     b[pid] += down
-                # if flags[2]:
-                #     b[pid] += left
-                # if flags[3]:
-                #     b[pid] += right
-            
+                # 内部像素，使用拉普拉斯算子计算散度
+                A[pid, pid] = 4
+                if (i-1, j) in pixel_dict:
+                    A[pid, pixel_dict[(i-1, j)]] = -1
+                if (i+1, j) in pixel_dict:
+                    A[pid, pixel_dict[(i+1, j)]] = -1
+                if (i, j-1) in pixel_dict:
+                    A[pid, pixel_dict[(i, j-1)]] = -1
+                if (i, j+1) in pixel_dict:
+                    A[pid, pixel_dict[(i, j+1)]] = -1
+                b[pid] = patch_laplace[i, j]
+
         # 解线性方程组
         x = spsolve(A.tocsr(), b)
-        print(x)
-        x = np.clip(x, 0, 255)
         # 将解的结果写回dest
         for (i, j), pid in pixel_dict.items():
-            dest[i, j, color] += x[pid]
-        
+            dest[i, j, color] = np.clip(x[pid], 0, 255)
     return dest
 
 def complete_image(input_path, mask_path, patch_path, i):
@@ -223,7 +205,7 @@ def complete_image(input_path, mask_path, patch_path, i):
     return stage1, stage2, stage2+stage3, blended
 
 plt.figure()
-n = 1
+n = 5
 for i in range(1, n+1):
     input_img, incomplete, naive, blended = complete_image(f'data/completion/input{i}.jpg', f'data/completion/input{i}_mask.jpg', f'data/completion/input{i}_patch.jpg', i)
     plt.subplot(n, 4, i*4-3)
@@ -243,15 +225,3 @@ for i in range(1, n+1):
     plt.title(f'Poisson Blended {i}')
     plt.axis('off')
 plt.show()
-
-# plt.figure()
-# input_path = "data/test/input1.png"
-# mask_path = "data/test/input1_mask.png"
-# patch_path = "data/test/input1_patch.png"
-# input_img, mask_img, patch_img = prepare_images(input_path, mask_path, patch_path)
-# sgm = dilate_mask(mask_img)
-# # sgm = mask_img
-# plt.imshow(sgm)
-# plt.show()
-# blended =  poisson_blend(patch_img, mask_img, sgm, input_img)
-# cv2.imwrite("data/test/input1_blended.png", blended)
