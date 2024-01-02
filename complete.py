@@ -154,8 +154,8 @@ def poisson_blend(patch, sgm, dest):
         for (i, j), pid in pixel_dict.items():
             if is_boundatry(sgm, i, j):
                 # 融合边界的像素，直接将dest中的像素值作为b的值
-                A[pid, pid] = -1
-                b[pid] = np.negative(dest[i, j, color])
+                A[pid, pid] = 1
+                b[pid] = dest[i, j, color]
                 
             else:
                 # 内部像素，使用拉普拉斯算子计算散度
@@ -204,9 +204,9 @@ plt.figure()
 n = 5
 for i in range(1, n+1):
     input_img, incomplete, naive, blended = complete_image(f'data/completion/input{i}.jpg', f'data/completion/input{i}_mask.jpg', f'data/completion/input{i}_patch.jpg', i)
-    cv2.imwrite(f'output/completion/input{i}_incomplete.jpg', incomplete)
-    cv2.imwrite(f'output/completion/input{i}_naive.jpg', naive)
-    cv2.imwrite(f'output/completion/input{i}_poisson.jpg', blended)
+    cv2.imwrite(f'output/input{i}_incomplete.jpg', incomplete)
+    cv2.imwrite(f'output/input{i}_naive.jpg', naive)
+    cv2.imwrite(f'output/input{i}_poisson.jpg', blended)
     plt.subplot(n, 4, i*4-3)
     plt.imshow(cv2.cvtColor(input_img, cv2.COLOR_BGR2RGB))
     plt.title(f'Input {i}')
