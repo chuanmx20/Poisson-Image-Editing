@@ -40,6 +40,7 @@ def get_patch(patch_shape, patch_img, best_match):
     return patch
 
 def find_best_match(masked_region, patch_img):
+    print(masked_region.shape, patch_img.shape)
     # 实现查找最佳匹配位置的逻辑
     # 将input_img被mask的区域在patch_img上平移，找到L2距离最小的位置
     best_position = (0, 0)
@@ -201,12 +202,19 @@ def complete_image(input_path, mask_path, patch_path, i):
     return stage1, stage2, stage2+stage3, blended
 
 plt.figure()
-n = 5
+n = 4
+test = False
+if test:
+    root_path = 'test/'
+    result_path = 'test/result/'
+else:
+    root_path = 'data/completion/'
+    result_path = 'data/completion/output/'
 for i in range(1, n+1):
-    input_img, incomplete, naive, blended = complete_image(f'data/completion/input{i}.jpg', f'data/completion/input{i}_mask.jpg', f'data/completion/input{i}_patch.jpg', i)
-    cv2.imwrite(f'output/input{i}_incomplete.jpg', incomplete)
-    cv2.imwrite(f'output/input{i}_naive.jpg', naive)
-    cv2.imwrite(f'output/input{i}_poisson.jpg', blended)
+    input_img, incomplete, naive, blended = complete_image(f'{root_path}input{i}.jpg', f'{root_path}input{i}_mask.jpg', f'{root_path}input{i}_patch.jpg', i)
+    cv2.imwrite(f'{result_path}input{i}_incomplete.jpg', incomplete)
+    cv2.imwrite(f'{result_path}input{i}_naive.jpg', naive)
+    cv2.imwrite(f'{result_path}input{i}_poisson.jpg', blended)
     plt.subplot(n, 4, i*4-3)
     plt.imshow(cv2.cvtColor(input_img, cv2.COLOR_BGR2RGB))
     plt.title(f'Input {i}')
