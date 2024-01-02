@@ -138,13 +138,9 @@ def poisson_blend(patch, sgm, dest):
     n_pixels = np.sum(sgm)
     pixel_dict = {} # 像素坐标到编号的映射
     pixel_index = 0
-    # 记录每个像素的邻居
-    patch_nb_f = []
     for i, j in itertools.product(range(sgm.shape[0]), range(sgm.shape[1])):
         if sgm[i, j]:
             pixel_dict[(i, j)] = pixel_index
-
-            patch_nb_f.append(get_neighbor_flags(patch, sgm, i, j))
             pixel_index += 1
     
     # 针对每个channel，构建系数矩阵A和b
@@ -201,13 +197,16 @@ def complete_image(input_path, mask_path, patch_path, i):
     stage3 = patch.copy()
     stage3[sgm==0] = 0
     # 使用Poisson Blending融合两部分图片
-    blended = poisson_blend(patch, dilated_mask, sgm, input_img).astype(np.uint8)
+    blended = poisson_blend(patch, sgm, input_img).astype(np.uint8)
     return stage1, stage2, stage2+stage3, blended
 
 plt.figure()
 n = 5
 for i in range(1, n+1):
     input_img, incomplete, naive, blended = complete_image(f'data/completion/input{i}.jpg', f'data/completion/input{i}_mask.jpg', f'data/completion/input{i}_patch.jpg', i)
+    cv2.imwrite(f'output/completion/input{i}_incomplete.jpg', incomplete)
+    cv2.imwrite(f'output/completion/input{i}_naive.jpg', naive)
+    cv2.imwrite(f'output/completion/input{i}_poisson.jpg', blended)
     plt.subplot(n, 4, i*4-3)
     plt.imshow(cv2.cvtColor(input_img, cv2.COLOR_BGR2RGB))
     plt.title(f'Input {i}')
